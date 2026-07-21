@@ -58,10 +58,57 @@ for v=0:10:100
     pause(0.3);
 end
 
-total_points = N_chirp;
-dx = diff(nt2); 
-threshold = 0.5; 
-jump_indices = find(abs(dx) > threshold);
-all_boundaries = [0, jump_indices, total_points];
-detected_lengths = diff(all_boundaries);
+%% Detect plateau lengths of nt2 (constant-value stair steps) and approximate period
+% nt2 is quantized to tScale; a jump occurs when the quantized level changes.
+dx = diff(nt2);
+jump_indices = find(abs(dx) > tScale/2);   % last index of each plateau (except final)
+plateau_starts = [1, jump_indices + 1];
+plateau_ends   = [jump_indices, N_chirp];
+detected_lengths = plateau_ends - plateau_starts + 1;
+plateau_values   = nt2(plateau_starts);
+
+fprintf('\n=== nt2 plateau lengths (constant-value runs) ===\n');
+fprintf('tScale = %.6f ns, plateaus = %d\n', tScale*1e9, numel(detected_lengths));
+fprintf('%4s %6s %6s %6s %14s\n', 'idx', 'start', 'end', 'len', 'nt2(us)');
+for k = 1:numel(detected_lengths)
+    fprintf('%4d %6d %6d %6d %14.9f\n', k, plateau_starts(k), plateau_ends(k), ...
+        detected_lengths(k), plateau_values(k)*1e6);
+end
+
+% Approximate period from plateau lengths (exclude first/last which may be truncated)
+inner_lengths = detected_lengths;
+if numel(inner_lengths) >= 3
+    inner_lengths = detected_lengths(2:end-1);
+end
+period_mean   = mean(inner_lengths);
+period_median = median(inner_lengths);
+% mode via histogram (works without Statistics Toolbox)
+[counts, edges] = histcounts(inner_lengths, min(inner_lengths):max(inner_lengths)+1);
+[~, imode] = max(counts);
+period_mode = edges(imode);
+% theory: local step length ≈ tScale / mean(|d nt3|)
+period_theory = tScale / mean(abs(diff(nt3)));
+approx_period = round(period_median);
+
+fprintf('\n=== Approximate period (chirps per stair step) ===\n');
+fprintf('mean(inner)   = %.3f\n', period_mean);
+fprintf('median(inner) = %.3f\n', period_median);
+fprintf('mode(inner)   = %d\n', period_mode);
+fprintf('theory        = %.3f  (tScale/mean|d nt3|)\n', period_theory);
+fprintf('approx_period = %d\n', approx_period);
+fprintf('length sequence: %s\n', mat2str(detected_lengths));
+
+figure(2);
+subplot(211);
+stem(detected_lengths, 'filled');
+yline(approx_period, 'r--', sprintf('period≈%d', approx_period));
+xlabel('plateau index'); ylabel('length (chirps)');
+title(sprintf('nt2 constant-value lengths, approx period = %d', approx_period));
+grid on;
+
+subplot(212);
+stairs(1:N_chirp, nt2*1e6);
+xlabel('chirp index n'); ylabel('nt2 (us)');
+title('nt2 staircase');
+grid on;
 
