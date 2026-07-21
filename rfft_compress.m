@@ -23,8 +23,12 @@ function rfft_decomp_result = rfft_compress(data,nSample,nChirp,nRx,nTx,Params)
     end
 
     data = uint8(data(:));
-    decodedBlocks = complex(zeros(blockSize, numBlocks));
-    encodedBlocks = complex(zeros(blockSize, numBlocks));
+    cubeSize = [nSample, nChirp, nRx, nTx];
+    DcmpData = complex(zeros(cubeSize));
+    encode_data = complex(zeros(cubeSize));
+    [localRange, localChirp, localAntenna] = ind2sub( ...
+        [Params.rangebins, Params.chirps, Params.antennas], ...
+        (1:blockSize).');
 
     % Limit temporary bit matrices while still decoding thousands of blocks
     % per call. The old path called dec2bin/bin2dec once for every block.
@@ -36,46 +40,52 @@ function rfft_decomp_result = rfft_compress(data,nSample,nChirp,nRx,nTx,Params)
         blockStarts = 1 + (blockNumbers - 1) * blockStride;
         byteIndices = bsxfun(@plus, (0:blockBytes-1).', blockStarts);
         rawBlocks = data(byteIndices);
+        decodedChunk = complex(zeros(blockSize, numel(blockNumbers)));
 
         % cp_mode_sel is the third MSB of the first byte after word reversal.
         isEge = bitget(rawBlocks(8, :), 6) ~= 0;
         bfpColumns = find(~isEge);
         if ~isempty(bfpColumns)
-            decodedBlocks(:, blockNumbers(bfpColumns)) = ...
-                bfp_decompress_blocks(rawBlocks(:, bfpColumns), ...
+            decodedChunk(:, bfpColumns) = bfp_decompress_blocks( ...
+                rawBlocks(:, bfpColumns), ...
                 Params, Params.DataOutputBitWidth_Dcm);
         end
 
         % Preserve the legacy EGE dispatch when that external decoder exists.
         % BFP data, which is the normal path, never enters this scalar loop.
         egeColumns = find(isEge);
-        for localColumn = egeColumns
+        for localColumn = reshape(egeColumns, 1, [])
             orderedBytes = reshape(rawBlocks(:, localColumn), 8, []);
             orderedBytes = flip(orderedBytes, 1);
             bitCharacters = dec2bin(double(orderedBytes(:)), 8);
             encodedBits = reshape(bitCharacters.', 1, []);
-            decodedBlocks(:, blockNumbers(localColumn)) = decompress_data( ...
+            decodedChunk(:, localColumn) = decompress_data( ...
                 encodedBits, Params, Params.DataOutputBitWidth_Dcm, ...
                 Params.DataInputBitWidth_Dcm, Params.BlockHeadBitWidth, ...
                 Params.GroupHeadBitWidth);
         end
-        encodedBlocks(:, blockNumbers) = complex( ...
+
+        encodedChunk = complex( ...
             double(rawBlocks(1:2:end, :)), ...
             double(rawBlocks(2:2:end, :)));
+
+        [antennaBlock, chirpBlock, rangeBlock, txBlock] = ind2sub( ...
+            [numAntennaBlocks, numChirpBlocks, numRangeBlocks, nTx], ...
+            blockNumbers);
+        globalRange = bsxfun(@plus, localRange, ...
+            (rangeBlock - 1) * Params.rangebins);
+        globalChirp = bsxfun(@plus, localChirp, ...
+            (chirpBlock - 1) * Params.chirps);
+        globalAntenna = bsxfun(@plus, localAntenna, ...
+            (antennaBlock - 1) * Params.antennas);
+        linearIndices = globalRange ...
+            + (globalChirp - 1) * nSample ...
+            + (globalAntenna - 1) * nSample * nChirp;
+        linearIndices = bsxfun(@plus, linearIndices, ...
+            (txBlock - 1) * nSample * nChirp * nRx);
+        DcmpData(linearIndices) = decodedChunk;
+        encode_data(linearIndices) = encodedChunk;
     end
-
-    outputSize = [nSample, nChirp, nRx, nTx];
-    blockGridSize = [ ...
-        Params.rangebins, Params.chirps, Params.antennas, ...
-        numAntennaBlocks, numChirpBlocks, numRangeBlocks, nTx];
-    blockOrder = [1, 6, 2, 5, 3, 4, 7];
-
-    DcmpData = reshape(permute( ...
-        reshape(decodedBlocks, blockGridSize), blockOrder), outputSize);
-    clear decodedBlocks;
-    encode_data = reshape(permute( ...
-        reshape(encodedBlocks, blockGridSize), blockOrder), outputSize);
-    clear encodedBlocks;
 
     % Keep the original API: when nTx > 1, the legacy loop returned the
     % final transmitter because each transmitter overwrote the same cube.
