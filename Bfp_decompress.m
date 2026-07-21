@@ -1,97 +1,83 @@
 function DataOut = Bfp_decompress(Input,Params,DataOutputBitWidth,DataInputBitWidth,BlockHeadBitWidth,GroupHeadBitWidth,GroupDataBitWidth)
 
-Input(1:BlockHeadBitWidth) = [];
-group_head                 = Input(1:GroupHeadBitWidth);
-lsbI                       = bin2dec(group_head(1:4));
-lsbQ                       = bin2dec(group_head(5:8));
-Input(1:GroupHeadBitWidth) = [];
-DataOut                    = zeros(1,Params.antennas*Params.rangebins*2);
-cnt                        = 1;
-
-if(Params.reshape_en==0)  
-    lenI = lsbI+floor(GroupDataBitWidth/(2*Params.antennas*Params.rangebins));
-    lenQ = lsbQ+floor(GroupDataBitWidth/(2*Params.antennas*Params.rangebins));
-    for ind = 1:Params.antennas*Params.rangebins
-        % imag part
-        data               = bin2dec(Input(1:lenI-lsbI));
-        Input(1:lenI-lsbI) = [];
-        if(data<2^(lenI-lsbI-1))
-            data  = data*2^lsbI;
-        else
-            data  = data*2^lsbI+(2^(DataOutputBitWidth/2-lenI)-1)*2^lenI;
-        end
-        if(data>=2^(DataOutputBitWidth/2-1))
-            data = data-2^(DataOutputBitWidth/2);
-        end
-        DataOut(cnt) = data;
-        cnt          = cnt+1;
-        % real part
-        data               = bin2dec(Input(1:lenQ-lsbQ));
-        Input(1:lenQ-lsbQ) = [];
-        if(data<2^(lenQ-lsbQ-1))
-            data  = data*2^lsbQ;
-        else
-            data  = data*2^lsbQ+(2^(DataOutputBitWidth/2-lenQ)-1)*2^lenQ;
-        end
-        if(data>=2^(DataOutputBitWidth/2-1))
-            data = data-2^(DataOutputBitWidth/2);
-        end
-        DataOut(cnt) = data;
-        cnt          = cnt+1;
-    end
+% Work with a logical bit vector and advance an index instead of repeatedly
+% deleting Input(1:n), which copies the remaining character array each time.
+if ischar(Input)
+    bits = Input(:).' == '1';
+elseif isa(Input, 'string')
+    bits = char(Input);
+    bits = bits(:).' == '1';
 else
-    for BcntIdx = 1:Params.rangebins
-        lenI = lsbI + floor(GroupDataBitWidth/2/Params.antennas);
-        lenQ = lsbQ + floor(GroupDataBitWidth/2/Params.antennas);
-        for ind = 1:Params.antennas 
-            % imag part
-            data               = bin2dec(Input(1:lenI-lsbI));
-            Input(1:lenI-lsbI) = [];
-            if(data<2^(lenI-lsbI-1))
-                data  = data*2^lsbI;
-            else
-                data  = data*2^lsbI+(2^(DataOutputBitWidth/2-lenI)-1)*2^lenI;
-            end
-            if(data>=2^(DataOutputBitWidth/2-1))
-                data = data-2^(DataOutputBitWidth/2);
-            end
-            DataOut(cnt) = data;
-            cnt          = cnt+1;
-            % real part
-            data               = bin2dec(Input(1:lenQ-lsbQ));
-            Input(1:lenQ-lsbQ) = [];
-            if(data<2^(lenQ-lsbQ-1))
-                data  = data*2^lsbQ;
-            else
-                data  = data*2^lsbQ+(2^(DataOutputBitWidth/2-lenQ)-1)*2^lenQ;
-            end
-            if(data>=2^(DataOutputBitWidth/2-1))
-                data = data-2^(DataOutputBitWidth/2);
-            end
-            DataOut(cnt) = data;
-            cnt          = cnt+1;
-        end
-        if BcntIdx < Params.rangebins
-            group_head                 = Input(1:GroupHeadBitWidth);
-            lsbI                       = bin2dec(group_head(1:4));
-            lsbQ                       = bin2dec(group_head(5:8));
-            Input(1:GroupHeadBitWidth) = [];
-        end
-    end 
+    bits = logical(Input(:).');
 end
 
-end 
+numSamples = Params.antennas * Params.rangebins;
+DataOut = zeros(1, 2 * numSamples);
+position = BlockHeadBitWidth + 1;
+
+if Params.reshape_en == 0
+    lsbI = nibble_value(bits, position);
+    lsbQ = nibble_value(bits, position + 4);
+    position = position + GroupHeadBitWidth;
+    payloadWidth = floor(GroupDataBitWidth / (2 * numSamples));
+    DataOut(:) = decode_components( ...
+        bits, position, payloadWidth, numSamples, lsbI, lsbQ, ...
+        DataOutputBitWidth / 2);
+else
+    payloadWidth = floor(GroupDataBitWidth / (2 * Params.antennas));
+    valuesPerGroup = 2 * Params.antennas;
+    for rangeIdx = 1:Params.rangebins
+        lsbI = nibble_value(bits, position);
+        lsbQ = nibble_value(bits, position + 4);
+        position = position + GroupHeadBitWidth;
+        outputIndices = (rangeIdx - 1) * valuesPerGroup ...
+            + (1:valuesPerGroup);
+        DataOut(outputIndices) = decode_components( ...
+            bits, position, payloadWidth, Params.antennas, lsbI, lsbQ, ...
+            DataOutputBitWidth / 2);
+        position = position + valuesPerGroup * payloadWidth;
+    end
+end
+
+end
+
+function value = nibble_value(bits, firstBit)
+value = 8 * double(bits(firstBit)) ...
+      + 4 * double(bits(firstBit + 1)) ...
+      + 2 * double(bits(firstBit + 2)) ...
+      +     double(bits(firstBit + 3));
+end
+
+function values = decode_components( ...
+    bits, firstBit, payloadWidth, numSamples, lsbI, lsbQ, componentWidth)
+
+numComponents = 2 * numSamples;
+lastBit = firstBit + numComponents * payloadWidth - 1;
+payload = reshape(bits(firstBit:lastBit), payloadWidth, numComponents);
+weights = 2 .^ (payloadWidth - 1:-1:0);
+raw = weights * double(payload);
+
+lsb = repmat([lsbI, lsbQ], 1, numSamples);
+values = raw .* (2 .^ lsb);
+negative = raw >= 2 ^ (payloadWidth - 1);
+storedWidth = payloadWidth + lsb;
+values(negative) = values(negative) ...
+    + (2 .^ (componentWidth - storedWidth(negative)) - 1) ...
+    .* (2 .^ storedWidth(negative));
+wrap = values >= 2 ^ (componentWidth - 1);
+values(wrap) = values(wrap) - 2 ^ componentWidth;
+end
 
 
 % function DataOut = Bfp_decompress(Input, Params, DataOutputBitWidth, DataInputBitWidth, BlockHeadBitWidth, GroupHeadBitWidth, GroupDataBitWidth)
 % %BFP_DECOMPRESS_FAST 快速版本的BFP解压缩函数
 % %   使用MEX文件实现，性能比原始MATLAB版本快10-50倍
-% 
+%
 % % 检查MEX文件是否存在，如果不存在则编译
 % if ~exist('Bfp_decompress_mex', 'file')
 %     compileMex();
 % end
-% 
+%
 % % 确保输入数据格式正确
 % if ischar(Input) || isstring(Input)
 %     % 将字符串转换为uint8数组
@@ -102,27 +88,27 @@ end
 %     % 尝试转换为uint8
 %     Input = uint8(Input);
 % end
-% 
+%
 % % 调用MEX函数
 % DataOut = Bfp_decompress_mex(Input, Params, DataOutputBitWidth, DataInputBitWidth, BlockHeadBitWidth, GroupHeadBitWidth, GroupDataBitWidth);
-% 
+%
 % end
-% 
+%
 % function compileMex()
 % %COMPILEMEX 编译MEX文件
 %     fprintf('正在编译Bfp_decompress_mex...\n');
-% 
+%
 %     mexCmd = 'mex ';
-% 
+%
 %     % 根据平台设置编译选项
 %     if ispc
 %         mexCmd = [mexCmd, 'COMPFLAGS="$COMPFLAGS /O2" '];
 %     else
 %         mexCmd = [mexCmd, 'CXXOPTIMFLAGS="-O2" '];
 %     end
-% 
+%
 %     mexCmd = [mexCmd, 'Bfp_decompress_mex.cpp'];
-% 
+%
 %     try
 %         eval(mexCmd);
 %         fprintf('编译成功！\n');
